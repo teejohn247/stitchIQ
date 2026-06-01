@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { v2 as cloudinary } from 'cloudinary';
 import { Job } from '../models/Job';
 import { enqueueAiJob } from '../services/queue';
+import { workerHeaders, workerErrorMessage } from '../services/workerClient';
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -81,15 +82,13 @@ async function runInMemoryJob(jobId: string, type: string, inputData: any) {
     console.log(`[Resilience Engine] Hitting AI worker directly at ${getAiWorkerUrl()}${endpoint}`);
     const response = await fetch(`${getAiWorkerUrl()}${endpoint}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-worker-token': getWorkerToken()
-      },
+      headers: workerHeaders(),
       body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
-      throw new Error(`AI worker returned status ${response.status}`);
+      const detail = await workerErrorMessage(response);
+      throw new Error(`AI worker returned status ${response.status}: ${detail}`);
     }
 
     let result = await response.json();
@@ -99,10 +98,7 @@ async function runInMemoryJob(jobId: string, type: string, inputData: any) {
         console.log('[Sketches] Fetching AI sketches for pattern pieces in direct fallback...');
         const sketchResponse = await fetch(`${getAiWorkerUrl()}/worker/pattern-sketches`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-worker-token': getWorkerToken()
-          },
+          headers: workerHeaders(),
           body: JSON.stringify({
             draft_cuts: result.draft_cuts || [],
             silhouette: result.specs?.silhouette || "",

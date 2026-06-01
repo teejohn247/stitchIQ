@@ -1,5 +1,6 @@
 import Bull from 'bull';
 import { Job as JobModel } from '../models/Job';
+import { workerHeaders, workerErrorMessage } from './workerClient';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 const AI_WORKER_URL = process.env.AI_WORKER_URL || 'http://127.0.0.1:8000';
@@ -54,15 +55,13 @@ aiJobQueue.process(async (job) => {
 
     const response = await fetch(`${AI_WORKER_URL}${endpoint}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-worker-token': WORKER_TOKEN
-      },
+      headers: workerHeaders(),
       body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
-      throw new Error(`AI worker returned status ${response.status}`);
+      const detail = await workerErrorMessage(response);
+      throw new Error(`AI worker returned status ${response.status}: ${detail}`);
     }
 
     let result = await response.json();
@@ -72,10 +71,7 @@ aiJobQueue.process(async (job) => {
         console.log('[Sketches] Fetching AI sketches for pattern pieces in queue...');
         const sketchResponse = await fetch(`${AI_WORKER_URL}/worker/pattern-sketches`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-worker-token': WORKER_TOKEN
-          },
+          headers: workerHeaders(),
           body: JSON.stringify({
             draft_cuts: result.draft_cuts || [],
             silhouette: result.specs?.silhouette || "",
