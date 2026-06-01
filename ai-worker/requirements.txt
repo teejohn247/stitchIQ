@@ -1,0 +1,15 @@
+fastapi==0.110.0
+uvicorn==0.29.0
+pydantic==2.6.4
+torch
+torchvision
+transformers
+diffusers
+accelerate
+safetensors
+open-clip-torch
+faiss-cpu
+cloudinary
+requests
+google-genai
+anthropic
