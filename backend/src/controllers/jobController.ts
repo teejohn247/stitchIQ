@@ -113,11 +113,11 @@ async function runInMemoryJob(jobId: string, type: string, inputData: any) {
           const sketchData = await sketchResponse.json();
           const sketchMap: Record<string, string> = {};
           for (const s of sketchData.sketches || []) {
-            sketchMap[s.label] = s.svg;
+            sketchMap[s.label.toUpperCase().trim()] = s.svg;
           }
           result.draft_cuts = (result.draft_cuts || []).map((cut: any) => ({
             ...cut,
-            svg: sketchMap[cut.label] || null
+            svg: sketchMap[cut.label.toUpperCase().trim()] || null
           }));
           console.log('[Sketches] Successfully merged AI sketches in direct fallback.');
         } else {

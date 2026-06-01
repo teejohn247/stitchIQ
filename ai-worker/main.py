@@ -893,26 +893,32 @@ Return ONLY a valid JSON array. No markdown. No explanation. Start with ["""
 
     raw = response.content[0].text.strip()
     
-    # Parse JSON
-    import re, json
-    raw = re.sub(r"```(?:json)?|```", "", raw).strip()
-    if not raw.startswith("["):
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if match:
-            raw = match.group()
+    try:
+        import re as _re, json as _json
+        raw = _re.sub(r"```(?:json)?|```", "", raw).strip()
+        if not raw.startswith("["):
+            match = _re.search(r"\[.*\]", raw, _re.DOTALL)
+            if match:
+                raw = match.group()
 
-    pieces_data = json.loads(raw)
+        pieces_data = _json.loads(raw)
 
-    # Build full SVG per piece
-    sketches = []
-    for piece in pieces_data:
-        svg = _build_piece_svg(piece)
-        sketches.append({
-            "label": piece["label"],
-            "svg": svg
-        })
+        sketches = []
+        for piece in pieces_data:
+            svg = _build_piece_svg(piece)
+            sketches.append({"label": piece["label"], "svg": svg})
 
-    return {"sketches": sketches}
+        return {"sketches": sketches}
+
+    except Exception as e:
+        logger.warning(f"Claude SVG generation failed ({e}). Falling back to mock SVGs.")
+        return {
+            "sketches": [
+                {"label": cut.get("label", f"Piece {i+1}"), "svg": _mock_svg(cut.get("label", "PIECE"), i)}
+                for i, cut in enumerate(req.draft_cuts)
+            ],
+            "mocked": True
+        }
 
 # ── Run ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
