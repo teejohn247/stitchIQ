@@ -742,90 +742,176 @@ class SketchRequest(BaseModel):
     fabric: str = ""        # e.g. "stretch crepe" — affects drape notes
 
 def _build_piece_svg(p: dict) -> str:
+    """
+    Renders a professional technical pattern piece in white-on-dark style,
+    matching industry standard pattern drafting sheets.
+    """
+    W, H   = 220, 260
+    BG     = "#0a1a0f"
+    LINE   = "#ffffff"
+    SEAM   = "#ffffff"
+    DIM    = "rgba(255,255,255,0.45)"
     GOLD   = "#D4A843"
-    DIM    = "rgba(255,255,255,0.35)"
-    DASH   = "rgba(212,168,67,0.5)"
-    BG     = "#0D2318"
-    
-    gx  = p.get("grain_x", 80)
-    gy1 = p.get("grain_y1", 70)
-    gy2 = p.get("grain_y2", 114)
-    ly  = p.get("label_y", 130)
-    label = p.get("label", "PIECE")
-    is_bias = p.get("is_bias", False)
-    
-    # Grain line — diagonal if bias cut
+    GRID   = "rgba(255,255,255,0.06)"
+
+    label    = p.get("label", "PIECE")
+    is_bias  = p.get("is_bias", False)
+    outer    = p.get("outer_path", "M30 30 L190 30 L200 220 L20 220 Z")
+    inner    = p.get("inner_path", outer)
+    gx       = p.get("grain_x", W // 2)
+    gy1      = p.get("grain_y1", 80)
+    gy2      = p.get("grain_y2", 180)
+    ly       = p.get("label_y", 150)
+    seam_mm  = p.get("seam_mm", "15")
+    width_cm = p.get("width_cm", "")
+    height_cm= p.get("height_cm", "")
+
+    # ── Grid ─────────────────────────────────────────────────────────
+    grid_lines = ""
+    for x in range(0, W + 1, 20):
+        grid_lines += f'<line x1="{x}" y1="0" x2="{x}" y2="{H}" stroke="{GRID}" stroke-width="0.5"/>'
+    for y in range(0, H + 1, 20):
+        grid_lines += f'<line x1="0" y1="{y}" x2="{W}" y2="{y}" stroke="{GRID}" stroke-width="0.5"/>'
+
+    # ── Grain line ───────────────────────────────────────────────────
     if is_bias:
+        dx, dy = 22, 22
+        x1, y1 = gx - dx, gy2
+        x2, y2 = gx + dx, gy1
         grain = f"""
-  <line x1="{gx-20}" y1="{gy2}" x2="{gx+20}" y2="{gy1}" 
-        stroke="{GOLD}" stroke-width="1"/>
-  <path d="M{gx-20+2} {gy2-6} L{gx-20} {gy2} L{gx-20+6} {gy2-2}" 
-        stroke="{GOLD}" stroke-width="1" fill="none"/>
-  <path d="M{gx+20-2} {gy1+6} L{gx+20} {gy1} L{gx+20-6} {gy1+2}" 
-        stroke="{GOLD}" stroke-width="1" fill="none"/>
-  <text x="{gx+24}" y="{(gy1+gy2)//2}" font-size="7" fill="{DIM}" 
-        font-family="sans-serif">BIAS</text>"""
+  <line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{LINE}" stroke-width="1"/>
+  <polygon points="{x2},{y2} {x2-5},{y2+9} {x2+5},{y2+9}" fill="{LINE}"/>
+  <polygon points="{x1},{y1} {x1-5},{y1-9} {x1+5},{y1-9}" fill="{LINE}"/>
+  <text x="{x2+6}" y="{(y1+y2)//2}" font-size="7" fill="{DIM}" font-family="monospace">BIAS</text>"""
     else:
         grain = f"""
-  <line x1="{gx}" y1="{gy1}" x2="{gx}" y2="{gy2}" 
-        stroke="{GOLD}" stroke-width="1"/>
-  <path d="M{gx-4} {gy1+8} L{gx} {gy1} L{gx+4} {gy1+8}" 
-        stroke="{GOLD}" stroke-width="1" fill="none"/>
-  <path d="M{gx-4} {gy2-8} L{gx} {gy2} L{gx+4} {gy2-8}" 
-        stroke="{GOLD}" stroke-width="1" fill="none"/>"""
+  <line x1="{gx}" y1="{gy1}" x2="{gx}" y2="{gy2}" stroke="{LINE}" stroke-width="1"/>
+  <polygon points="{gx},{gy1} {gx-5},{gy1+10} {gx+5},{gy1+10}" fill="{LINE}"/>
+  <polygon points="{gx},{gy2} {gx-5},{gy2-10} {gx+5},{gy2-10}" fill="{LINE}"/>"""
 
-    # Notch at top centre
-    notch = f"""
-  <path d="M76 18 L80 12 L84 18" 
-        stroke="{GOLD}" stroke-width="1" fill="{GOLD}"/>"""
+    # ── Notches (double triangle marks) ──────────────────────────────
+    notches = f"""
+  <polygon points="{W//2},{16} {W//2-5},{26} {W//2+5},{26}" fill="{LINE}" opacity="0.9"/>
+  <polygon points="{W//2},{10} {W//2-4},{18} {W//2+4},{18}" fill="none" stroke="{LINE}" stroke-width="0.8"/>"""
 
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 200" 
-     width="160" height="200" style="background:{BG}">
-  
-  <path d="{p['outer_path']}" 
-        fill="rgba(212,168,67,0.08)" 
-        stroke="{GOLD}" stroke-width="1.5"/>
-  
-  <path d="{p.get('inner_path', p['outer_path'])}" 
-        fill="none" 
-        stroke="{DASH}" stroke-width="0.8" 
-        stroke-dasharray="4 3"/>
+    # ── Dimension lines ───────────────────────────────────────────────
+    dim_lines = ""
+    # Width dimension at top
+    if width_cm:
+        dim_lines += f"""
+  <line x1="22" y1="8" x2="{W-22}" y2="8" stroke="{DIM}" stroke-width="0.6" marker-start="url(#arr)" marker-end="url(#arr)"/>
+  <text x="{W//2}" y="6" text-anchor="middle" font-size="7" fill="{DIM}" font-family="monospace">{width_cm} cm</text>"""
+    # Height dimension on right
+    if height_cm:
+        dim_lines += f"""
+  <line x1="{W-8}" y1="22" x2="{W-8}" y2="{H-22}" stroke="{DIM}" stroke-width="0.6"/>
+  <text x="{W-4}" y="{H//2}" text-anchor="middle" font-size="7" fill="{DIM}" font-family="monospace" transform="rotate(90,{W-4},{H//2})">{height_cm} cm</text>"""
+
+    # ── Seam allowance label ──────────────────────────────────────────
+    seam_label = f"""
+  <text x="6" y="{H-6}" font-size="6.5" fill="{DIM}" font-family="monospace">SA {seam_mm}mm</text>"""
+
+    # ── Piece label ───────────────────────────────────────────────────
+    # Truncate long labels
+    display = label if len(label) <= 22 else label[:20] + "…"
+    piece_label = f"""
+  <text x="{W//2}" y="{ly}" text-anchor="middle" font-size="9" font-weight="600"
+        fill="{LINE}" font-family="monospace" letter-spacing="0.5">{display}</text>"""
+
+    # ── Cut instruction ───────────────────────────────────────────────
+    cut_text = "CUT ON BIAS" if is_bias else "CUT ON FOLD" if "fold" in label.lower() else "CUT 1"
+    cut_instruction = f"""
+  <text x="{W//2}" y="{ly+14}" text-anchor="middle" font-size="6.5"
+        fill="{GOLD}" font-family="monospace" opacity="0.85">{cut_text}</text>"""
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}"
+     width="{W}" height="{H}" style="background:{BG};display:block">
+  <defs>
+    <marker id="arr" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+      <path d="M0,0 L4,2 L0,4 Z" fill="{DIM}"/>
+    </marker>
+  </defs>
+
+  {grid_lines}
+
+  <!-- Cut line (outer) -->
+  <path d="{outer}"
+        fill="rgba(255,255,255,0.04)"
+        stroke="{LINE}" stroke-width="1.8" stroke-linejoin="round"/>
+
+  <!-- Seam allowance (inner dashed) -->
+  <path d="{inner}"
+        fill="none"
+        stroke="{SEAM}" stroke-width="0.8"
+        stroke-dasharray="5 3" opacity="0.5"/>
+
   {grain}
-  {notch}
-  
-  <text x="80" y="{ly}" 
-        text-anchor="middle" font-size="9.5" font-weight="500" 
-        fill="{GOLD}" font-family="sans-serif">
-    {label}
-  </text>
+  {notches}
+  {dim_lines}
+  {seam_label}
+  {piece_label}
+  {cut_instruction}
 </svg>"""
 
     return svg
 
+
 def _mock_svg(label: str, i: int) -> str:
-    """Return a simple mock SVG for testing without GPU."""
-    shapes = [
-        "M22 20 L138 20 L148 160 L12 160 Z",   # bodice
-        "M30 20 Q80 24 130 20 L148 100 Q148 150 80 180 Q12 150 12 100 Z",  # skirt
-        "M20 140 Q20 30 155 30 L155 52 Q42 52 42 140 Z",  # facing
-        "M50 20 Q80 18 110 30 L118 60 Q122 120 100 170 Q80 182 60 170 Q38 120 42 60 Z",  # loop
-        "M80 12 C120 18 148 50 145 90 C142 130 118 160 80 175 C42 160 18 130 15 90 C12 50 40 18 80 12 Z",  # panel
-    ]
-    inners = [
-        "M28 26 L132 26 L141 154 L19 154 Z",
-        "M36 26 Q80 30 124 26 L141 100 Q141 144 80 170 Q19 144 19 100 Z",
-        "M26 136 Q26 36 149 36 L149 46 Q36 46 36 136 Z",
-        "M54 26 Q80 24 106 34 L113 62 Q116 118 94 164 Q80 174 66 164 Q44 118 47 62 Z",
-        "M80 20 C115 26 138 54 135 90 C132 126 110 152 80 166 C50 152 28 126 25 90 C22 54 45 26 80 20 Z",
-    ]
-    idx = i % len(shapes)
+    """
+    Realistic pattern piece shapes for each garment section.
+    Uses proper fashion pattern geometry — bodices, panels, collars, etc.
+    """
+    lbl = label.upper()
+
+    # Pick shape based on label keywords
+    if any(k in lbl for k in ["FRONT BODICE", "BACK BODICE"]):
+        outer = "M30 25 C45 22 135 22 150 25 L158 130 C158 145 148 158 140 162 L80 170 L20 162 C12 158 2 145 2 130 Z"
+        inner = "M38 33 C52 30 128 30 142 33 L150 128 C150 142 142 153 134 157 L80 164 L26 157 C18 153 10 142 10 128 Z"
+        gx, gy1, gy2, ly = 80, 60, 145, 148
+        w, h = "42 cm", "58 cm"
+    elif any(k in lbl for k in ["SKIRT", "PANEL"]):
+        outer = "M20 20 C50 15 150 15 180 20 L188 200 C185 235 160 250 110 252 L80 254 L50 252 C20 250 -5 235 -8 200 Z"
+        inner = "M28 28 C57 23 143 23 172 28 L180 198 C177 230 154 244 107 246 L80 248 L53 246 C26 244 3 230 0 198 Z"
+        gx, gy1, gy2, ly = 90, 60, 220, 205
+        w, h = "68 cm", "95 cm"
+    elif any(k in lbl for k in ["SLEEVE"]):
+        outer = "M80 15 C120 18 158 50 162 85 C165 108 155 128 140 138 L130 155 L80 165 L30 155 L20 138 C5 128 -5 108 -2 85 C2 50 40 18 80 15 Z"
+        inner = "M80 24 C116 27 150 56 154 88 C157 109 148 127 134 136 L124 152 L80 161 L36 152 L26 136 C12 127 3 109 6 88 C10 56 44 27 80 24 Z"
+        gx, gy1, gy2, ly = 80, 55, 145, 130
+        w, h = "38 cm", "62 cm"
+    elif any(k in lbl for k in ["COLLAR", "NECKLINE", "FACING"]):
+        outer = "M10 80 C10 30 60 12 110 15 L165 20 C195 25 205 45 200 65 L195 85 C190 100 175 108 150 108 L80 110 L25 105 C12 100 10 92 10 80 Z"
+        inner = "M18 78 C18 36 65 20 113 23 L160 28 C188 33 197 50 192 68 L187 86 C183 99 169 106 145 106 L80 108 L28 103 C18 98 18 88 18 78 Z"
+        gx, gy1, gy2, ly = 105, 50, 90, 88
+        w, h = "52 cm", "18 cm"
+    elif any(k in lbl for k in ["LINING"]):
+        outer = "M28 22 L152 22 L160 155 C158 168 148 175 130 176 L80 178 L30 176 C12 175 2 168 0 155 Z"
+        inner = "M36 30 L144 30 L152 152 C150 163 142 169 126 170 L80 172 L34 170 C18 169 10 163 8 152 Z"
+        gx, gy1, gy2, ly = 80, 65, 148, 145
+        w, h = "40 cm", "52 cm"
+    elif any(k in lbl for k in ["STRAP", "LOOP", "BAND"]):
+        outer = "M50 20 L130 20 L132 240 L48 240 Z"
+        inner = "M58 28 L122 28 L124 232 L56 232 Z"
+        gx, gy1, gy2, ly = 90, 60, 200, 175
+        w, h = "8 cm", "55 cm"
+    else:
+        # Generic panel
+        outer = "M25 22 L155 22 L162 185 C160 200 148 210 125 212 L80 214 L35 212 C12 210 0 200 -2 185 Z"
+        inner = "M33 30 L147 30 L154 182 C152 196 141 205 119 207 L80 209 L41 207 C19 205 8 196 6 182 Z"
+        gx, gy1, gy2, ly = 80, 70, 175, 162
+        w, h = "46 cm", "68 cm"
+
+    is_bias = any(k in lbl for k in ["BIAS", "PANEL", "LOOP"])
     return _build_piece_svg({
         "label": label,
-        "outer_path": shapes[idx],
-        "inner_path": inners[idx],
-        "grain_x": 80, "grain_y1": 70, "grain_y2": 114,
-        "label_y": 132,
-        "is_bias": "bias" in label.lower() or "loop" in label.lower()
+        "outer_path": outer,
+        "inner_path": inner,
+        "grain_x": gx, "grain_y1": gy1, "grain_y2": gy2,
+        "label_y": ly,
+        "is_bias": is_bias,
+        "width_cm": w,
+        "height_cm": h,
+        "seam_mm": "15"
     })
 
 @app.post("/worker/pattern-sketches")
@@ -865,36 +951,41 @@ def pattern_sketches(req: SketchRequest, x_worker_token: str = Header(...)):
             for c in req.draft_cuts
         ])
 
-        prompt = f"""You are a fashion pattern drafting expert. 
-I need you to generate SVG path data for flat technical pattern piece sketches.
+        prompt = f"""You are a professional fashion pattern drafting expert creating technical flat pattern pieces.
+Generate SVG path data that looks like industry-standard sewing pattern sheets (think Vogue Patterns, Galia Lahav technical sheets).
 
 Garment silhouette: {req.silhouette}
 Fabric type: {req.fabric}
 
-Pattern pieces to draw:
+Pattern pieces:
 {pieces_desc}
 
-For each piece, return a JSON array. Each item must have:
-- "label": the piece name (exact, from the list above)
-- "outer_path": an SVG path `d` attribute string for the outer cut line
-  - viewBox is 0 0 160 200
-  - Path must be closed (end with Z)
-  - Use realistic fashion pattern shapes:
-    * Bodice pieces: trapezoid shape, wider at bottom, princess seam curves if structured
-    * Skirt panels: wider at hem, curved side seams for mermaid/trumpet silhouettes
-    * Facings: thin arc or curved strip shapes
-    * Panels: organic shapes following the described cut
-    * Sleeves: cap curve at top, tapered sides
-    * Loops/straps: long narrow rectangles or ovals
-  - Place shapes centred around x=80, y=100, with 15px margin from all edges
-- "inner_path": same shape inset ~7px for seam allowance dashed line
-- "grain_x": x coordinate for grain line centre (usually 80)
-- "grain_y1": top of grain line arrow
-- "grain_y2": bottom of grain line arrow  
-- "label_y": y coordinate to place the label text (should be inside the shape)
-- "is_bias": true if cut on bias (diagonal grain line needed)
+Return a JSON array. Each item must have:
+- "label": exact piece name from the list above
+- "outer_path": SVG path `d` string for the outer cut line
+  - viewBox is 0 0 220 260
+  - MUST be a closed path ending with Z
+  - Use anatomically correct fashion pattern shapes:
+    * Bodice: narrower at shoulder/top, wider at waist, curved side seams with subtle waist curve
+    * Skirt panel: narrow at waist, generous sweep at hem with a curved hem line
+    * Back bodice: similar to front but with center-back straight edge if needed
+    * Sleeves: bell-curve cap at top, tapered towards cuff, slightly curved undersea
+    * Collar/facing: flat crescent or arc shape, much wider than tall
+    * Lining: mirrors the main piece but slightly smaller
+    * Straps/bands/loops: long narrow rectangle or strip
+  - Centre shapes within the 220×260 canvas with at least 15px margin
+  - Use cubic bezier curves (C) for organic edges, not just straight lines
+- "inner_path": same outline inset ~8px all around for seam allowance dashed line
+- "grain_x": x for grain line (usually canvas centre, ~110)
+- "grain_y1": y for top grain arrow (inside shape, upper quarter)
+- "grain_y2": y for bottom grain arrow (inside shape, lower quarter)
+- "label_y": y for label text placement (centre of shape)
+- "is_bias": true only if piece is explicitly bias-cut
+- "width_cm": estimated finished width in cm (e.g. "42 cm")
+- "height_cm": estimated finished height in cm (e.g. "58 cm")
+- "seam_mm": seam allowance in mm as string (usually "15")
 
-Return ONLY a valid JSON array. No markdown. No explanation. Start with ["""
+Return ONLY a valid JSON array. No markdown fences. No explanation. Start with ["""
 
         response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
