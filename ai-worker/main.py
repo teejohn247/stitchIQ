@@ -561,7 +561,7 @@ No markdown. No ```json. No explanation before or after. Just the JSON object.
     if "gemini_client" not in models:
         raise HTTPException(status_code=503, detail="No vision model loaded")
 
-    logger.info("Using Gemini 1.5 Flash vision for pattern analysis")
+    logger.info("Starting vision analysis (model cascade: 2.5-flash-lite → 2.5-flash → 3.5-flash)")
 
     from google.genai import types
     from io import BytesIO
@@ -571,37 +571,49 @@ No markdown. No ```json. No explanation before or after. Just the JSON object.
     img.save(buf, format="JPEG", quality=92)
     image_bytes = buf.getvalue()
 
-    # Retry up to 3 times on 429 quota errors with backoff
-    _GEMINI_MODEL = "gemini-1.5-flash"
+    # Try models in order; fall to next on quota exhaustion
+    _GEMINI_MODELS = [
+        "gemini-2.5-flash-lite",   # most quota-friendly
+        "gemini-2.5-flash",        # fallback
+        "gemini-3.5-flash",        # newest, try if others exhausted
+    ]
     last_err = None
-    for attempt in range(3):
-        try:
-            response = models["gemini_client"].models.generate_content(
-                model=_GEMINI_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    types.Part.from_text(text=VISION_PROMPT)
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=8192,
+    for model_name in _GEMINI_MODELS:
+        for attempt in range(2):
+            try:
+                logger.info(f"Trying vision model: {model_name} (attempt {attempt+1})")
+                response = models["gemini_client"].models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                        types.Part.from_text(text=VISION_PROMPT)
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    )
                 )
-            )
-            raw = response.text
-            logger.info(f"Gemini raw (first 300 chars): {raw[:300]}")
-            return parse_json_from_text(raw)
-        except Exception as _e:
-            last_err = _e
-            err_str = str(_e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                wait = 15 * (attempt + 1)
-                logger.warning(f"Gemini quota hit (attempt {attempt+1}), retrying in {wait}s…")
-                _time.sleep(wait)
-            else:
-                raise
+                raw = response.text
+                logger.info(f"Gemini ({model_name}) raw (first 300 chars): {raw[:300]}")
+                return parse_json_from_text(raw)
+            except Exception as _e:
+                last_err = _e
+                err_str = str(_e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    if attempt == 0:
+                        logger.warning(f"{model_name} quota hit, retrying in 15s…")
+                        _time.sleep(15)
+                    else:
+                        logger.warning(f"{model_name} quota exhausted, trying next model…")
+                        break   # move to next model
+                elif "404" in err_str or "not found" in err_str.lower():
+                    logger.warning(f"{model_name} not found, trying next model…")
+                    break
+                else:
+                    raise
 
     raise HTTPException(status_code=429,
-        detail=f"Gemini quota exhausted after retries: {last_err}")
+        detail=f"All Gemini models exhausted quota: {last_err}")
 
 def analyse_image_minimal(img) -> dict:
     """
@@ -640,34 +652,38 @@ def analyse_image_minimal(img) -> dict:
     img.save(buf, format="JPEG", quality=85)
     image_bytes = buf.getvalue()
 
-    _GEMINI_MODEL = "gemini-1.5-flash"
+    _GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"]
     last_err = None
-    for attempt in range(3):
-        try:
-            response = models["gemini_client"].models.generate_content(
-                model=_GEMINI_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    types.Part.from_text(text=MINIMAL_PROMPT)
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=8192,
+    for model_name in _GEMINI_MODELS:
+        for attempt in range(2):
+            try:
+                response = models["gemini_client"].models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                        types.Part.from_text(text=MINIMAL_PROMPT)
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    )
                 )
-            )
-            return parse_json_from_text(response.text)
-        except Exception as _e:
-            last_err = _e
-            err_str = str(_e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                wait = 15 * (attempt + 1)
-                logger.warning(f"Gemini quota hit on minimal (attempt {attempt+1}), retrying in {wait}s…")
-                _time.sleep(wait)
-            else:
-                raise
+                return parse_json_from_text(response.text)
+            except Exception as _e:
+                last_err = _e
+                err_str = str(_e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    if attempt == 0:
+                        _time.sleep(15)
+                    else:
+                        break
+                elif "404" in err_str or "not found" in err_str.lower():
+                    break
+                else:
+                    raise
 
     raise HTTPException(status_code=429,
-        detail=f"Gemini quota exhausted after retries: {last_err}")
+        detail=f"All Gemini models exhausted quota: {last_err}")
 
 @app.post("/worker/pattern-analysis")
 def pattern_analysis(req: PatternAnalysisRequest, x_worker_token: str = Header(...)):
