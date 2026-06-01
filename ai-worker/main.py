@@ -741,6 +741,183 @@ class SketchRequest(BaseModel):
     silhouette: str = ""    # e.g. "Mermaid/Trumpet" — helps Claude draw accurately
     fabric: str = ""        # e.g. "stretch crepe" — affects drape notes
 
+def _parse_svg_path(d: str):
+    """
+    Convert an SVG path d-string (M/L/C/Q/Z commands) into lists of
+    (vertices, codes) compatible with matplotlib.path.Path.
+    """
+    import re as _re
+    num_pat = r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?'
+    tokens = _re.findall(r'[MLCQZmlcqz]|' + num_pat, d)
+
+    verts, codes = [], []
+    i = 0
+    cur_x = cur_y = 0.0
+    start_x = start_y = 0.0
+    cmd = 'M'
+
+    def nxt():
+        nonlocal i
+        v = float(tokens[i]); i += 1; return v
+
+    while i < len(tokens):
+        t = tokens[i]
+        if t in 'MLCQZmlcqz':
+            cmd = t; i += 1
+
+        if cmd == 'M':
+            x, y = nxt(), nxt()
+            cur_x, cur_y = start_x, start_y = x, y
+            verts.append((x, y)); codes.append(1)   # MOVETO
+            cmd = 'L'
+        elif cmd == 'L':
+            x, y = nxt(), nxt()
+            cur_x, cur_y = x, y
+            verts.append((x, y)); codes.append(2)   # LINETO
+        elif cmd == 'C':
+            x1, y1 = nxt(), nxt()
+            x2, y2 = nxt(), nxt()
+            x,  y  = nxt(), nxt()
+            cur_x, cur_y = x, y
+            verts += [(x1,y1),(x2,y2),(x,y)]
+            codes += [4, 4, 4]                       # CURVE4 ×3
+        elif cmd == 'Q':
+            x1, y1 = nxt(), nxt()
+            x,  y  = nxt(), nxt()
+            cur_x, cur_y = x, y
+            verts += [(x1,y1),(x,y)]
+            codes += [3, 3]                          # CURVE3 ×2
+        elif cmd in ('Z', 'z'):
+            verts.append((start_x, start_y)); codes.append(79)  # CLOSEPOLY
+            cur_x, cur_y = start_x, start_y
+
+    return verts, codes
+
+
+def _build_piece_image(p: dict) -> str:
+    """
+    Render a pattern piece as a PNG and return a base64 data URL.
+    Uses matplotlib for anti-aliased, professional-quality output.
+    Falls back to inline SVG if matplotlib is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.path import Path as MplPath
+        import io, base64 as _b64
+
+        W_IN, H_IN, DPI = 4.4, 5.2, 100   # → 440 × 520 px
+        BG   = '#0a1a0f'
+        LINE = '#ffffff'
+        SEAM = '#ffffff'
+        DIM  = '#ffffff'
+        GOLD = '#D4A843'
+
+        fig, ax = plt.subplots(figsize=(W_IN, H_IN), dpi=DPI)
+        fig.patch.set_facecolor(BG)
+        ax.set_facecolor(BG)
+        ax.set_xlim(0, 220)
+        ax.set_ylim(260, 0)   # SVG has Y-down; invert for matplotlib
+        ax.set_aspect('equal')
+        ax.axis('off')
+        ax.set_position([0, 0, 1, 1])
+
+        # ── Grid ────────────────────────────────────────────────────
+        for x in range(0, 221, 20):
+            ax.axvline(x, color=LINE, alpha=0.05, lw=0.4, zorder=1)
+        for y in range(0, 261, 20):
+            ax.axhline(y, color=LINE, alpha=0.05, lw=0.4, zorder=1)
+
+        # ── Helper to add an SVG path as a matplotlib patch ─────────
+        def add_path(d, fc, ec, lw, ls='-', alpha=1.0):
+            verts, codes = _parse_svg_path(d)
+            if not verts:
+                return
+            patch = mpatches.PathPatch(
+                MplPath(verts, codes),
+                facecolor=fc, edgecolor=ec,
+                linewidth=lw, linestyle=ls,
+                alpha=alpha, zorder=2
+            )
+            ax.add_patch(patch)
+
+        outer_d = p.get('outer_path', 'M25 22 L195 22 L200 238 L20 238 Z')
+        inner_d = p.get('inner_path', outer_d)
+        add_path(outer_d, fc=(1,1,1,0.03), ec=LINE, lw=1.8)
+        add_path(inner_d, fc='none',        ec=SEAM, lw=0.8, ls=(0,(5,3)), alpha=0.45)
+
+        # ── Grain line ───────────────────────────────────────────────
+        gx  = p.get('grain_x', 110)
+        gy1 = p.get('grain_y1', 80)
+        gy2 = p.get('grain_y2', 180)
+        is_bias = p.get('is_bias', False)
+        arr_kw = dict(arrowstyle='<->', color=LINE, lw=0.9,
+                      mutation_scale=8, shrinkA=0, shrinkB=0)
+        if is_bias:
+            ax.annotate('', xy=(gx+22, gy1), xytext=(gx-22, gy2),
+                        arrowprops=arr_kw)
+            ax.text(gx+26, (gy1+gy2)/2, 'BIAS', color=DIM, fontsize=6,
+                    fontfamily='monospace', va='center', alpha=0.5)
+        else:
+            ax.annotate('', xy=(gx, gy1), xytext=(gx, gy2), arrowprops=arr_kw)
+
+        # ── Notch triangles at top ───────────────────────────────────
+        cx = 110
+        ax.fill([cx-5, cx, cx+5], [26, 16, 26], color=LINE, alpha=0.9, zorder=4)
+        ax.plot([cx-4, cx, cx+4, cx-4], [18, 10, 18, 18], color=LINE, lw=0.7, zorder=4)
+
+        # ── Dimension lines ──────────────────────────────────────────
+        dim_kw = dict(arrowstyle='<->', color=DIM, lw=0.6,
+                      mutation_scale=5, shrinkA=0, shrinkB=0)
+        width_cm  = p.get('width_cm', '')
+        height_cm = p.get('height_cm', '')
+        if width_cm:
+            ax.annotate('', xy=(198, 7), xytext=(22, 7), arrowprops=dict(**dim_kw, alpha=0.45))
+            ax.text(110, 5, width_cm, color=DIM, fontsize=6, ha='center',
+                    fontfamily='monospace', alpha=0.45)
+        if height_cm:
+            ax.annotate('', xy=(213, 240), xytext=(213, 22), arrowprops=dict(**dim_kw, alpha=0.45))
+            ax.text(216, 131, height_cm, color=DIM, fontsize=6, ha='center',
+                    fontfamily='monospace', alpha=0.45, rotation=90, va='center')
+
+        # ── Seam allowance label ─────────────────────────────────────
+        seam_mm = p.get('seam_mm', '15')
+        ax.text(6, 255, f'SA {seam_mm}mm', color=DIM, fontsize=6.5,
+                fontfamily='monospace', alpha=0.40, zorder=5)
+
+        # ── Piece label ──────────────────────────────────────────────
+        label   = p.get('label', 'PIECE')
+        ly      = p.get('label_y', 150)
+        display = label if len(label) <= 22 else label[:20] + '…'
+        ax.text(110, ly, display, color=LINE, fontsize=9, fontweight='bold',
+                ha='center', fontfamily='monospace', zorder=5)
+
+        # ── Cut instruction ──────────────────────────────────────────
+        if is_bias:
+            cut_txt = 'CUT ON BIAS'
+        elif 'fold' in label.lower():
+            cut_txt = 'CUT ON FOLD'
+        else:
+            cut_txt = 'CUT 1'
+        ax.text(110, ly + 14, cut_txt, color=GOLD, fontsize=6.5,
+                ha='center', fontfamily='monospace', alpha=0.85, zorder=5)
+
+        # ── Render to PNG buffer ─────────────────────────────────────
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=DPI,
+                    facecolor=BG, edgecolor='none', bbox_inches=None)
+        plt.close(fig)
+        buf.seek(0)
+        b64str = _b64.b64encode(buf.read()).decode()
+        return f'data:image/png;base64,{b64str}'
+
+    except Exception as _e:
+        logger.warning(f'PNG render failed ({_e}), falling back to SVG')
+        return _build_piece_svg(p)
+
+
 def _build_piece_svg(p: dict) -> str:
     """
     Renders a professional technical pattern piece in white-on-dark style,
@@ -902,7 +1079,7 @@ def _mock_svg(label: str, i: int) -> str:
         w, h = "46 cm", "68 cm"
 
     is_bias = any(k in lbl for k in ["BIAS", "PANEL", "LOOP"])
-    return _build_piece_svg({
+    return _build_piece_image({
         "label": label,
         "outer_path": outer,
         "inner_path": inner,
@@ -1005,8 +1182,8 @@ Return ONLY a valid JSON array. No markdown fences. No explanation. Start with [
         pieces_data = _json.loads(raw)
         sketches = []
         for piece in pieces_data:
-            svg = _build_piece_svg(piece)
-            sketches.append({"label": piece["label"], "svg": svg})
+            img = _build_piece_image(piece)
+            sketches.append({"label": piece["label"], "svg": img})
 
         return {"sketches": sketches}
 
