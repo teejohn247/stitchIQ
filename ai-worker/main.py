@@ -846,15 +846,26 @@ def pattern_sketches(req: SketchRequest, x_worker_token: str = Header(...)):
             "mocked": True
         }
 
-    import anthropic
-    client = anthropic.Anthropic(api_key=anthropic_key)
+    def _mock_fallback(reason: str):
+        logger.warning(f"Claude SVG fallback: {reason}")
+        return {
+            "sketches": [
+                {"label": cut.get("label", f"Piece {i+1}"), "svg": _mock_svg(cut.get("label", "PIECE"), i)}
+                for i, cut in enumerate(req.draft_cuts)
+            ],
+            "mocked": True
+        }
 
-    pieces_desc = "\n".join([
-        f"- {c.get('label','?')}: {c.get('note','')} | seam: {c.get('seam','')}"
-        for c in req.draft_cuts
-    ])
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=anthropic_key)
 
-    prompt = f"""You are a fashion pattern drafting expert. 
+        pieces_desc = "\n".join([
+            f"- {c.get('label','?')}: {c.get('note','')} | seam: {c.get('seam','')}"
+            for c in req.draft_cuts
+        ])
+
+        prompt = f"""You are a fashion pattern drafting expert. 
 I need you to generate SVG path data for flat technical pattern piece sketches.
 
 Garment silhouette: {req.silhouette}
@@ -885,15 +896,14 @@ For each piece, return a JSON array. Each item must have:
 
 Return ONLY a valid JSON array. No markdown. No explanation. Start with ["""
 
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}]
-    )
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-    raw = response.content[0].text.strip()
-    
-    try:
+        raw = response.content[0].text.strip()
+
         import re as _re, json as _json
         raw = _re.sub(r"```(?:json)?|```", "", raw).strip()
         if not raw.startswith("["):
@@ -902,7 +912,6 @@ Return ONLY a valid JSON array. No markdown. No explanation. Start with ["""
                 raw = match.group()
 
         pieces_data = _json.loads(raw)
-
         sketches = []
         for piece in pieces_data:
             svg = _build_piece_svg(piece)
@@ -911,14 +920,7 @@ Return ONLY a valid JSON array. No markdown. No explanation. Start with ["""
         return {"sketches": sketches}
 
     except Exception as e:
-        logger.warning(f"Claude SVG generation failed ({e}). Falling back to mock SVGs.")
-        return {
-            "sketches": [
-                {"label": cut.get("label", f"Piece {i+1}"), "svg": _mock_svg(cut.get("label", "PIECE"), i)}
-                for i, cut in enumerate(req.draft_cuts)
-            ],
-            "mocked": True
-        }
+        return _mock_fallback(str(e))
 
 # ── Run ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":

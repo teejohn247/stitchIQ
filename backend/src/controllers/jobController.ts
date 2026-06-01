@@ -105,6 +105,10 @@ async function runInMemoryJob(jobId: string, type: string, inputData: any) {
             fabric: result.specs?.fabric || ""
           })
         });
+        if (!sketchResponse.ok) {
+          const detail = await workerErrorMessage(sketchResponse);
+          console.warn(`[Sketches] Failed: status ${sketchResponse.status} — ${detail}`);
+        }
         if (sketchResponse.ok) {
           const sketchData = await sketchResponse.json();
           const sketchMap: Record<string, string> = {};
