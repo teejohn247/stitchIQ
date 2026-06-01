@@ -17,6 +17,24 @@ logger = logging.getLogger("stitchiq-worker")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "your-secret-token")
 MOCK_ML_MODELS = os.environ.get("MOCK_ML_MODELS", "true").lower() == "true"
 
+
+def _should_load_heavy_models():
+    """SDXL/CLIP need NVIDIA GPU. auto=skip when no CUDA (local Mac-friendly)."""
+    pref = os.environ.get("LOAD_HEAVY_MODELS", "auto").lower()
+    if pref in ("0", "false", "no"):
+        return False
+    if pref in ("1", "true", "yes"):
+        return True
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+LOAD_HEAVY_MODELS = _should_load_heavy_models()
+
+
 def _stitchiq_base():
     override = os.environ.get("STITCHIQ_BASE")
     if override:
@@ -30,7 +48,7 @@ LORA_PATH    = os.path.join(_BASE, "lora_output/stitchiq_african_v1.safetensors"
 FAISS_PATH   = os.path.join(_BASE, "clip_index/fabric_clip.index")
 MAPPING_PATH = os.path.join(_BASE, "clip_index/fabric_id_map.json")
 
-if not MOCK_ML_MODELS:
+if not MOCK_ML_MODELS and LOAD_HEAVY_MODELS:
     import torch
     import faiss
     import numpy as np
@@ -39,11 +57,16 @@ if not MOCK_ML_MODELS:
     import cloudinary
     import cloudinary.uploader
     from diffusers import StableDiffusionXLPipeline, StableDiffusionXLInpaintPipeline
-    
+
     cloudinary.config(
         cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME", "mock"),
         api_key=os.environ.get("CLOUDINARY_API_KEY", "mock"),
         api_secret=os.environ.get("CLOUDINARY_API_SECRET", "mock")
+    )
+elif not MOCK_ML_MODELS:
+    logger.info(
+        "Real API mode without SDXL/CLIP (no CUDA or LOAD_HEAVY_MODELS=false). "
+        "Pattern analysis + sketches use Gemini/Anthropic."
     )
 else:
     logger.info("Running in MOCK_ML_MODELS mode. Heavy PyTorch dependencies will not be loaded.")
@@ -72,6 +95,19 @@ def load_image(url):
 # ── Model registry (loaded once on startup) ─────────────────────────
 models = {}
 
+def _load_gemini_client():
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    if not gemini_key:
+        logger.warning("GEMINI_API_KEY not set — pattern analysis unavailable")
+        return
+    try:
+        from google import genai as google_genai
+        models["gemini_client"] = google_genai.Client(api_key=gemini_key)
+        logger.info("Gemini 2.5 Flash loaded")
+    except Exception as e:
+        logger.error(f"Failed to load Gemini: {e}")
+
+
 @app.on_event("startup")
 async def load_models():
     if MOCK_ML_MODELS:
@@ -79,6 +115,12 @@ async def load_models():
         models["sdxl"] = "mock_sdxl"
         models["sdxl_inpaint"] = "mock_sdxl_inpaint"
         models["clip"] = "mock_clip"
+        return
+
+    _load_gemini_client()
+
+    if not LOAD_HEAVY_MODELS:
+        logger.info("Light mode ready (Gemini/Anthropic). SDXL/CLIP not loaded.")
         return
 
     logger.info("Loading models — this takes ~3–5 minutes on first boot...")
@@ -137,25 +179,13 @@ async def load_models():
     else:
         logger.warning(f"ID mapping not found at {MAPPING_PATH}")
 
-    # ── Vision model — Gemini 2.5 Flash (free tier) ─────────────────
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-    if GEMINI_API_KEY:
-        try:
-            from google import genai as google_genai
-            gemini_client = google_genai.Client(api_key=GEMINI_API_KEY)
-            models["gemini_client"] = gemini_client
-            logger.info("Gemini 2.5 Flash loaded — free tier active")
-        except Exception as e:
-            logger.error(f"Failed to load Gemini: {e}")
-    else:
-        logger.warning("GEMINI_API_KEY not set — pattern analysis unavailable")
-
     logger.info("All models loaded and ready!")
 
 def activate_model(model_name: str):
-    if MOCK_ML_MODELS:
+    if MOCK_ML_MODELS or not LOAD_HEAVY_MODELS:
         return
-        
+
+    import torch
     logger.info(f"Activating model '{model_name}' on GPU...")
     
     if model_name == "sdxl":
@@ -199,13 +229,21 @@ def health():
     gpu_name = "no GPU"
     vram_gb = 0.0
     
-    if not MOCK_ML_MODELS and torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        vram_gb = round(torch.cuda.memory_allocated() / 1e9, 2)
+    if not MOCK_ML_MODELS and LOAD_HEAVY_MODELS:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = round(torch.cuda.memory_allocated() / 1e9, 2)
         
+    if MOCK_ML_MODELS:
+        mode = "mock"
+    elif not LOAD_HEAVY_MODELS:
+        mode = "light"
+    else:
+        mode = "production"
     return {
         "status": "ok",
-        "mode": "mock" if MOCK_ML_MODELS else "production",
+        "mode": mode,
         "gpu": gpu_name,
         "models": list(models.keys()),
         "vram_gb": vram_gb
@@ -225,9 +263,7 @@ def generate_image(req: SDXLRequest, x_worker_token: str = Header(...)):
     verify_token(x_worker_token)
     
     if MOCK_ML_MODELS:
-        # Simulate processing time
         time.sleep(2)
-        # Select a gorgeous look matching the mannequin style
         url = "https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg"
         prompt_lower = req.prompt.lower()
         if "ankara" in prompt_lower or "nigerian" in prompt_lower:
@@ -237,21 +273,24 @@ def generate_image(req: SDXLRequest, x_worker_token: str = Header(...)):
             "public_id": "mock_id",
             "mocked": True
         }
-        
-    # Determine if it's armless or has sleeves
+
+    if "sdxl" not in models:
+        raise HTTPException(
+            status_code=503,
+            detail="SDXL not loaded. Use a CUDA machine with LOAD_HEAVY_MODELS=true, or test pattern_analysis in light mode.",
+        )
+
     prompt_lower = req.prompt.lower()
     is_armless = True
-    
-    # If the user specifies any type of sleeves or asks for sleeves, it is NOT armless
     sleeve_keywords = ["sleeve", "sleeves", "long-sleeve", "puff-sleeve", "arm", "arms", "hand", "hands", "shoulder loop"]
     if any(kw in prompt_lower for kw in sleeve_keywords) and "armless" not in prompt_lower and "sleeveless" not in prompt_lower:
         is_armless = False
-        
+
     if is_armless:
         mannequin_details = "on an armless tailors canvas mannequin with a beige linen torso, polished gold neck cap metal finial, elegant tailor-studio background"
     else:
         mannequin_details = "on a premium tailors mannequin with articulated wood arms and hands, elegant tailor-studio background"
-        
+
     base_prompt = f"africanfashion {req.prompt}" if "africanfashion" not in req.prompt else req.prompt
     prompt = f"{base_prompt}, {mannequin_details}"
 
@@ -293,6 +332,9 @@ def inpaint_image(req: InpaintRequest, x_worker_token: str = Header(...)):
             "url": "https://res.cloudinary.com/demo/image/upload/v1312461204/sample.jpg",
             "mocked": True
         }
+
+    if "sdxl_inpaint" not in models:
+        raise HTTPException(status_code=503, detail="SDXL inpaint not loaded (light mode).")
 
     def url_to_pil(url):
         return load_image(url).convert("RGB").resize((1024, 1024))
@@ -356,6 +398,10 @@ def clip_search(req: CLIPSearchRequest, x_worker_token: str = Header(...)):
             "mocked": True
         }
 
+    if "clip" not in models:
+        raise HTTPException(status_code=503, detail="CLIP/FAISS not loaded (light mode).")
+
+    import torch
     img = load_image(req.image_url).convert("RGB")
     tensor = models["clip_preprocess"](img).unsqueeze(0).to("cuda")
 
