@@ -786,6 +786,8 @@ class SketchRequest(BaseModel):
     silhouette: str = ""    # e.g. "Mermaid/Trumpet" — helps Claude draw accurately
     fabric: str = ""        # e.g. "stretch crepe" — affects drape notes
 
+from pattern_drafter import draft_piece as _draft_piece
+
 def _parse_svg_path(d: str):
     """
     Convert an SVG path d-string (M/L/C/Q/Z commands) into lists of
@@ -1138,102 +1140,26 @@ def _mock_svg(label: str, i: int) -> str:
 
 @app.post("/worker/pattern-sketches")
 def pattern_sketches(req: SketchRequest, x_worker_token: str = Header(...)):
+    """
+    Generate technical pattern block images for each draft cut.
+    Uses metric pattern drafting formulas (Winnifred Aldrich method).
+    No external AI call needed — deterministic, instant, works offline.
+    """
     verify_token(x_worker_token)
 
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if MOCK_ML_MODELS or not anthropic_key:
-        logger.info("Mock mode active or ANTHROPIC_API_KEY not set. Returning high-fidelity mock SVG sketches.")
-        return {
-            "sketches": [
-                {
-                    "label": cut.get("label", f"Piece {i+1}"),
-                    "svg": _mock_svg(cut.get("label","PIECE"), i)
-                }
-                for i, cut in enumerate(req.draft_cuts)
-            ],
-            "mocked": True
-        }
+    logger.info(f"Drafting {len(req.draft_cuts)} pattern pieces via PatternDrafter")
+    sketches = []
+    for i, cut in enumerate(req.draft_cuts):
+        label = cut.get("label", f"Piece {i+1}")
+        try:
+            img = _draft_piece(label)
+            sketches.append({"label": label, "svg": img})
+            logger.info(f"  [{i+1}] {label} — drafted OK")
+        except Exception as e:
+            logger.warning(f"  [{i+1}] {label} — draft failed: {e}")
+            sketches.append({"label": label, "svg": ""})
 
-    def _mock_fallback(reason: str):
-        logger.warning(f"Claude SVG fallback: {reason}")
-        return {
-            "sketches": [
-                {"label": cut.get("label", f"Piece {i+1}"), "svg": _mock_svg(cut.get("label", "PIECE"), i)}
-                for i, cut in enumerate(req.draft_cuts)
-            ],
-            "mocked": True
-        }
-
-    try:
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=anthropic_key)
-
-        pieces_desc = "\n".join([
-            f"- {c.get('label','?')}: {c.get('note','')} | seam: {c.get('seam','')}"
-            for c in req.draft_cuts
-        ])
-
-        prompt = f"""You are a professional fashion pattern drafting expert creating technical flat pattern pieces.
-Generate SVG path data that looks like industry-standard sewing pattern sheets (think Vogue Patterns, Galia Lahav technical sheets).
-
-Garment silhouette: {req.silhouette}
-Fabric type: {req.fabric}
-
-Pattern pieces:
-{pieces_desc}
-
-Return a JSON array. Each item must have:
-- "label": exact piece name from the list above
-- "outer_path": SVG path `d` string for the outer cut line
-  - viewBox is 0 0 220 260
-  - MUST be a closed path ending with Z
-  - Use anatomically correct fashion pattern shapes:
-    * Bodice: narrower at shoulder/top, wider at waist, curved side seams with subtle waist curve
-    * Skirt panel: narrow at waist, generous sweep at hem with a curved hem line
-    * Back bodice: similar to front but with center-back straight edge if needed
-    * Sleeves: bell-curve cap at top, tapered towards cuff, slightly curved undersea
-    * Collar/facing: flat crescent or arc shape, much wider than tall
-    * Lining: mirrors the main piece but slightly smaller
-    * Straps/bands/loops: long narrow rectangle or strip
-  - Centre shapes within the 220×260 canvas with at least 15px margin
-  - Use cubic bezier curves (C) for organic edges, not just straight lines
-- "inner_path": same outline inset ~8px all around for seam allowance dashed line
-- "grain_x": x for grain line (usually canvas centre, ~110)
-- "grain_y1": y for top grain arrow (inside shape, upper quarter)
-- "grain_y2": y for bottom grain arrow (inside shape, lower quarter)
-- "label_y": y for label text placement (centre of shape)
-- "is_bias": true only if piece is explicitly bias-cut
-- "width_cm": estimated finished width in cm (e.g. "42 cm")
-- "height_cm": estimated finished height in cm (e.g. "58 cm")
-- "seam_mm": seam allowance in mm as string (usually "15")
-
-Return ONLY a valid JSON array. No markdown fences. No explanation. Start with ["""
-
-        response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw = response.content[0].text.strip()
-
-        import re as _re, json as _json
-        raw = _re.sub(r"```(?:json)?|```", "", raw).strip()
-        if not raw.startswith("["):
-            match = _re.search(r"\[.*\]", raw, _re.DOTALL)
-            if match:
-                raw = match.group()
-
-        pieces_data = _json.loads(raw)
-        sketches = []
-        for piece in pieces_data:
-            img = _build_piece_image(piece)
-            sketches.append({"label": piece["label"], "svg": img})
-
-        return {"sketches": sketches}
-
-    except Exception as e:
-        return _mock_fallback(str(e))
+    return {"sketches": sketches, "mocked": False}
 
 # ── Run ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
