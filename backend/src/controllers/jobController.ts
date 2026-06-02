@@ -95,36 +95,44 @@ async function runInMemoryJob(jobId: string, type: string, inputData: any) {
 
     if (type === 'pattern_analysis') {
       try {
-        console.log('[Sketches] Fetching AI sketches for pattern pieces in direct fallback...');
+        console.log('[Pattern] Generating pattern sheet (direct fallback)...');
         const sketchResponse = await fetch(`${getAiWorkerUrl()}/worker/pattern-sketches`, {
           method: 'POST',
           headers: workerHeaders(),
           body: JSON.stringify({
-            draft_cuts: result.draft_cuts || [],
-            silhouette: result.specs?.silhouette || "",
-            fabric: result.specs?.fabric || ""
+            draft_cuts:  result.draft_cuts || [],
+            silhouette:  result.specs?.silhouette || result.silhouette || "",
+            fabric:      result.specs?.fabric     || result.fabric     || "",
+            style_name:  result.specs?.style_name || result.style_name || "",
+            sleeves:     result.specs?.sleeves    || result.sleeves    || "Sleeveless",
+            uk_size:     12
           })
         });
         if (!sketchResponse.ok) {
           const detail = await workerErrorMessage(sketchResponse);
-          console.warn(`[Sketches] Failed: status ${sketchResponse.status} — ${detail}`);
-        }
-        if (sketchResponse.ok) {
-          const sketchData = await sketchResponse.json();
-          const sketchMap: Record<string, string> = {};
-          for (const s of sketchData.sketches || []) {
-            sketchMap[s.label.toUpperCase().trim()] = s.svg;
-          }
-          result.draft_cuts = (result.draft_cuts || []).map((cut: any) => ({
-            ...cut,
-            svg: sketchMap[cut.label.toUpperCase().trim()] || null
-          }));
-          console.log('[Sketches] Successfully merged AI sketches in direct fallback.');
+          console.warn(`[Pattern] Failed: status ${sketchResponse.status} — ${detail}`);
         } else {
-          console.warn(`[Sketches] Failed to fetch sketches in direct fallback: status ${sketchResponse.status}`);
+          const sketchData = await sketchResponse.json();
+
+          if (sketchData.pattern_svg)     result.pattern_svg     = sketchData.pattern_svg;
+          if (sketchData.pattern_pdf_b64) result.pattern_pdf_b64 = sketchData.pattern_pdf_b64;
+          if (sketchData.pattern_json)    result.pattern_json    = sketchData.pattern_json;
+          if (sketchData.piece_count)     result.piece_count     = sketchData.piece_count;
+
+          if (sketchData.sketches?.length) {
+            const sketchMap: Record<string, string> = {};
+            for (const s of sketchData.sketches) {
+              sketchMap[s.label.toUpperCase().trim()] = s.svg;
+            }
+            result.draft_cuts = (result.draft_cuts || []).map((cut: any) => ({
+              ...cut,
+              svg: sketchMap[cut.label.toUpperCase().trim()] || null
+            }));
+          }
+          console.log(`[Pattern] Done — ${sketchData.piece_count ?? '?'} pieces generated.`);
         }
       } catch (err: any) {
-        console.error('[Sketches] Error fetching sketches in direct fallback:', err.message);
+        console.error('[Pattern] Error generating pattern sheet:', err.message);
       }
     }
     

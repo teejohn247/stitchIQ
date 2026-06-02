@@ -783,10 +783,14 @@ def fabric_price(req: FabricPriceRequest, x_worker_token: str = Header(...)):
 # ── Pattern piece SVG sketch generator ───────────────────────────────
 class SketchRequest(BaseModel):
     draft_cuts: list        # the draft_cuts array from Gemini analysis
-    silhouette: str = ""    # e.g. "Mermaid/Trumpet" — helps Claude draw accurately
-    fabric: str = ""        # e.g. "stretch crepe" — affects drape notes
+    silhouette: str = ""
+    fabric: str = ""
+    style_name: str = ""
+    sleeves: str = "Sleeveless"
+    uk_size: int = 12       # dress size for measurements
 
 from pattern_drafter import draft_piece as _draft_piece
+from pattern_engine import run_pattern_engine as _run_pattern_engine
 
 def _parse_svg_path(d: str):
     """
@@ -1141,25 +1145,56 @@ def _mock_svg(label: str, i: int) -> str:
 @app.post("/worker/pattern-sketches")
 def pattern_sketches(req: SketchRequest, x_worker_token: str = Header(...)):
     """
-    Generate technical pattern block images for each draft cut.
-    Uses metric pattern drafting formulas (Winnifred Aldrich method).
-    No external AI call needed — deterministic, instant, works offline.
+    Generate a full technical pattern sheet (SVG + PDF) using the
+    PatternEngine (Winnifred Aldrich metric method).
+    Also returns per-piece PNG thumbnails for card display.
     """
     verify_token(x_worker_token)
 
-    logger.info(f"Drafting {len(req.draft_cuts)} pattern pieces via PatternDrafter")
-    sketches = []
-    for i, cut in enumerate(req.draft_cuts):
-        label = cut.get("label", f"Piece {i+1}")
-        try:
-            img = _draft_piece(label)
-            sketches.append({"label": label, "svg": img})
-            logger.info(f"  [{i+1}] {label} — drafted OK")
-        except Exception as e:
-            logger.warning(f"  [{i+1}] {label} — draft failed: {e}")
-            sketches.append({"label": label, "svg": ""})
+    gemini_specs = {
+        "style_name": req.style_name or "Garment",
+        "silhouette": req.silhouette,
+        "fabric":     req.fabric,
+        "sleeves":    req.sleeves,
+    }
 
-    return {"sketches": sketches, "mocked": False}
+    logger.info(f"Running PatternEngine for '{gemini_specs['style_name']}' "
+                f"(size UK {req.uk_size}, silhouette: {req.silhouette})")
+
+    try:
+        result = _run_pattern_engine(gemini_specs, size=req.uk_size)
+
+        # Also generate per-piece PNG thumbnails for the card grid
+        sketches = []
+        for i, cut in enumerate(req.draft_cuts):
+            label = cut.get("label", f"Piece {i+1}")
+            try:
+                img = _draft_piece(label)
+                sketches.append({"label": label, "svg": img})
+            except Exception as e:
+                logger.warning(f"Thumbnail failed for '{label}': {e}")
+                sketches.append({"label": label, "svg": ""})
+
+        return {
+            "pattern_svg":    result["svg"],
+            "pattern_pdf_b64": result["pdf_b64"],
+            "pattern_json":   result["json"],
+            "piece_count":    result["piece_count"],
+            "sketches":       sketches,
+            "mocked":         False,
+        }
+
+    except Exception as e:
+        logger.error(f"PatternEngine failed: {e}", exc_info=True)
+        # Fallback: per-piece thumbnails only
+        sketches = []
+        for i, cut in enumerate(req.draft_cuts):
+            label = cut.get("label", f"Piece {i+1}")
+            try:
+                sketches.append({"label": label, "svg": _draft_piece(label)})
+            except Exception:
+                sketches.append({"label": label, "svg": ""})
+        return {"sketches": sketches, "mocked": True, "error": str(e)}
 
 # ── Run ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":

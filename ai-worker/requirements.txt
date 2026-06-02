@@ -13,3 +13,7 @@ cloudinary
 requests
 google-genai
 anthropic
+svgwrite
+reportlab
+matplotlib
+numpy
